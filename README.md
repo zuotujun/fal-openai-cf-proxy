@@ -55,6 +55,8 @@
     FAL_KEY="your_fal_ai_key"
     API_KEY="your_custom_api_key"
     ```
+    两个 KEY 都支持多个传入，通过英文逗号分隔，因此 API_KEY 中不能包含逗号
+    
     **注意:** 不要将此文件提交到 Git 仓库。`.gitignore` 文件已配置忽略此文件。
 5.  **启动本地开发服务器:**
     ```bash

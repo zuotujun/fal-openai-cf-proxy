@@ -15,8 +15,18 @@ import { fal } from '@fal-ai/client';
 
 // Define the expected environment variables/secrets
 interface Env {
-	FAL_KEY: string; // Secret for Fal AI API
-	API_KEY: string; // Secret for authenticating requests to this worker
+	/**
+	 * Comma-separated list of Fal AI API keys for redundancy.
+	 * Example: "key1,key2,key3"
+	 * Configure this secret in your Cloudflare dashboard or wrangler.jsonc.
+	 */
+	FAL_KEY: string;
+	/**
+	 * Comma-separated list of allowed API keys for client authentication.
+	 * Example: "clientkey1,clientkey2,verysecretkey"
+	 * Configure this secret in your Cloudflare dashboard or wrangler.jsonc.
+	 */
+	API_KEY: string;
 }
 
 // OpenAI Request/Response Types (Simplified)
@@ -46,6 +56,12 @@ interface FalInput {
 	// Fal-specific parameters can be added here if needed
 }
 
+// Payload for fal.stream or fal.subscribe
+interface FalPayload {
+    input: FalInput;
+    // Add other stream/subscribe options if needed
+}
+
 // Simple type for log entries in the stream
 interface LogEntry {
 	message: string;
@@ -61,7 +77,7 @@ interface FalStreamEventData {
     logs?: LogEntry[];
 }
 
-// Type for Fal Stream Event
+// Type for Fal Stream Event (passed in iterator)
 interface FalStreamEvent {
 	output: string;
     reasoning?: any; // Or a more specific type if known
@@ -73,7 +89,7 @@ interface FalStreamEvent {
 
 // Type for Fal Subscribe Result
 interface FalSubscribeResult {
-	data: FalStreamEventData;
+	data: FalStreamEventData; // Assuming subscribe result structure matches stream event data
 	requestId: string;
 	// Other potential top-level properties can be added here
 }
@@ -114,7 +130,7 @@ const getOwner = (modelId: string): string => {
 function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt: string; prompt: string } {
 	let fixed_system_prompt_content = "";
 	const conversation_message_blocks: string[] = [];
-	console.log(`Original messages count: ${messages.length}`);
+	// console.log(`Original messages count: ${messages.length}`); // Reduce noise
 
 	for (const message of messages) {
 		let content = (message.content === null || message.content === undefined) ? "" : String(message.content);
@@ -146,7 +162,7 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 		space_occupied_by_fixed_system = fixed_system_prompt_content.length + 4; // Approx space for separator
 	}
 	const remaining_system_limit = Math.max(0, SYSTEM_PROMPT_LIMIT - space_occupied_by_fixed_system);
-	console.log(`Trimmed fixed system prompt length: ${fixed_system_prompt_content.length}. Approx remaining system history limit: ${remaining_system_limit}`);
+	// console.log(`Trimmed fixed system prompt length: ${fixed_system_prompt_content.length}. Approx remaining system history limit: ${remaining_system_limit}`); // Reduce noise
 
 	const prompt_history_blocks: string[] = [];
 	const system_prompt_history_blocks: string[] = [];
@@ -155,13 +171,13 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 	let promptFull = false;
 	let systemHistoryFull = (remaining_system_limit <= 0);
 
-	console.log(`Processing ${conversation_message_blocks.length} user/assistant messages for recency filling.`);
+	// console.log(`Processing ${conversation_message_blocks.length} user/assistant messages for recency filling.`); // Reduce noise
 	for (let i = conversation_message_blocks.length - 1; i >= 0; i--) {
 		const message_block = conversation_message_blocks[i];
 		const block_length = message_block.length;
 
 		if (promptFull && systemHistoryFull) {
-			console.log(`Both prompt and system history slots full. Omitting older messages from index ${i}.`);
+			// console.log(`Both prompt and system history slots full. Omitting older messages from index ${i}.`); // Reduce noise
 			break;
 		}
 
@@ -172,7 +188,7 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 				continue;
 			} else {
 				promptFull = true;
-				console.log(`Prompt limit (${PROMPT_LIMIT}) reached. Trying system history slot.`);
+				// console.log(`Prompt limit (${PROMPT_LIMIT}) reached. Trying system history slot.`); // Reduce noise
 			}
 		}
 
@@ -183,7 +199,7 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 				 continue;
 			} else {
 				 systemHistoryFull = true;
-				 console.log(`System history limit (${remaining_system_limit}) reached.`);
+				 // console.log(`System history limit (${remaining_system_limit}) reached.`); // Reduce noise
 			}
 		}
 	}
@@ -197,13 +213,13 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 
 	if (hasFixedSystem && hasSystemHistory) {
 		final_system_prompt = fixed_system_prompt_content + SEPARATOR + system_prompt_history_content;
-		console.log("Combining fixed system prompt and history with separator.");
+		// console.log("Combining fixed system prompt and history with separator."); // Reduce noise
 	} else if (hasFixedSystem) {
 		final_system_prompt = fixed_system_prompt_content;
-		console.log("Using only fixed system prompt.");
+		// console.log("Using only fixed system prompt."); // Reduce noise
 	} else if (hasSystemHistory) {
 		final_system_prompt = system_prompt_history_content;
-		console.log("Using only history in system prompt slot.");
+		// console.log("Using only history in system prompt slot."); // Reduce noise
 	}
 
 	const result = {
@@ -211,8 +227,8 @@ function convertMessagesToFalPrompt(messages: OpenAIMessage[]): { system_prompt:
 		prompt: final_prompt
 	};
 
-	console.log(`Final system_prompt length: ${result.system_prompt.length}`);
-	console.log(`Final prompt length: ${result.prompt.length}`);
+	// console.log(`Final system_prompt length: ${result.system_prompt.length}`); // Reduce noise
+	// console.log(`Final prompt length: ${result.prompt.length}`); // Reduce noise
 	return result;
 }
 
@@ -221,51 +237,234 @@ function isValidFalModelId(modelId: string): modelId is FalModelId {
 	return (FAL_SUPPORTED_MODELS as readonly string[]).includes(modelId);
 }
 
+/**
+ * Attempts a Fal API request (stream or subscribe) with key rotation on failure.
+ * @param falKeys Array of Fal API keys.
+ * @param falPayload Payload for the fal request.
+ * @param stream Whether to use streaming.
+ * @param modelToReport The original model name requested by the user for reporting.
+ * @param ctx ExecutionContext for streaming requests.
+ * @returns For stream=true: { readable: ReadableStream }. For stream=false: FalSubscribeResult.
+ * @throws Throws an error if all keys fail or if a non-retryable error occurs.
+ */
+async function tryFalRequest(
+    falKeys: string[],
+    falPayload: FalPayload,
+    stream: boolean,
+    modelToReport: string, // Pass the original model name
+    ctx?: ExecutionContext
+): Promise<{ readable: ReadableStream } | FalSubscribeResult> {
+    let lastError: any = null;
+
+    if (falKeys.length === 0) {
+        throw new Error("No Fal API keys configured.");
+    }
+
+    for (let i = 0; i < falKeys.length; i++) {
+        const key = falKeys[i];
+        console.log(`Attempting Fal request with key index ${i}`);
+        try {
+            // Configure the client with the current key for this attempt
+            fal.config({ credentials: key });
+
+            if (stream && ctx) {
+                // --- Stream Handling ---
+                console.log(`Initiating fal.stream with key index ${i}... Payload:`, JSON.stringify(falPayload, null, 2));
+                const falStream = await fal.stream("fal-ai/any-llm", falPayload as any); // Use the prepared payload object
+                console.log(`fal.stream initiated successfully with key index ${i}.`);
+
+                // Set up the response stream
+                const { readable, writable } = new TransformStream();
+                const writer = writable.getWriter();
+                const encoder = new TextEncoder();
+
+                // Start background processing for the stream events
+                const streamProcessing = (async () => {
+                    try {
+                        let previousOutput = '';
+                        for await (const event of falStream) {
+                           // console.log(`Fal Stream Event (Key ${i}):`, event); // Verbose logging
+                            const currentOutput = (event && typeof event.output === 'string') ? event.output : '';
+                            const isPartial = (event && typeof event.partial === 'boolean') ? event.partial : true; // Assume partial if not specified
+                            const errorInfo = (event && event.error) ? event.error : null;
+                            const logs = (event && Array.isArray((event as any).logs)) ? (event as any).logs : [];
+                            const reasoningData = (event && event.reasoning) ? event.reasoning : null;
+                            logs.forEach((log: LogEntry) => console.log(`[Fal Log - Key ${i}] ${log.message}`));
+
+                            if (errorInfo) {
+                                console.error(`Error received in fal stream event (Key ${i}):`, errorInfo);
+                                const errorChunk = { id: `chatcmpl-${Date.now()}-error`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: modelToReport, choices: [{ index: 0, delta: {}, finish_reason: "error", logprobs: null, message: { role: 'assistant', content: `Fal Stream Error: ${JSON.stringify(errorInfo)}` } }] };
+                                await writer.write(encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`));
+                                throw new Error(`Fal Stream Error: ${JSON.stringify(errorInfo)}`); // Throw to stop processing this stream
+                            }
+
+                            let deltaContent = '';
+                            if (currentOutput.startsWith(previousOutput)) {
+                                deltaContent = currentOutput.substring(previousOutput.length);
+                            } else if (currentOutput.length > 0) {
+                                console.warn(`Fal stream output mismatch (Key ${i}). Sending full current output as delta.`);
+                                deltaContent = currentOutput;
+                                previousOutput = ''; // Reset
+                            }
+                            if (currentOutput.length > 0) {
+                                previousOutput = currentOutput;
+                            }
+
+                            if (deltaContent || reasoningData || !isPartial) {
+                                const choice = {
+                                    index: 0,
+                                    delta: { content: deltaContent },
+                                    finish_reason: isPartial === false ? "stop" : null,
+                                    logprobs: null,
+                                    ...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
+                                };
+                                const openAIChunk = {
+                                    id: `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
+                                    object: "chat.completion.chunk",
+                                    created: Math.floor(Date.now() / 1000),
+                                    model: modelToReport, // Report the originally requested model
+                                    choices: [choice]
+                                };
+                                await writer.write(encoder.encode(`data: ${JSON.stringify(openAIChunk)}\n\n`));
+                            }
+                        }
+                        console.log(`Fal stream iteration finished successfully (Key ${i}).`);
+                        await writer.write(encoder.encode(`data: [DONE]\n\n`));
+
+                    } catch (streamError: any) {
+                        console.error(`Error during fal stream processing (Key ${i}):`, streamError);
+                         try {
+                            // Attempt to write an error chunk to the client stream
+                            const errorDetails = (streamError instanceof Error) ? streamError.message : JSON.stringify(streamError);
+							const errorChunk = { error: { message: "Stream processing error", type: "proxy_error", param: null, code: null, details: errorDetails } };
+							await writer.write(encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`));
+                            // Always attempt to send DONE, even after error chunk
+							await writer.write(encoder.encode(`data: [DONE]\n\n`));
+                        } catch (writeError) {
+                            console.error(`Error writing final stream error message (Key ${i}):`, writeError);
+                        }
+                        // Do not re-throw here, as the initial response has already been sent.
+                        // The error is reported within the stream itself.
+                    } finally {
+                        try {
+                            console.log(`Closing stream writer (Key ${i})...`);
+                            await writer.close();
+                            console.log(`Stream writer closed (Key ${i}).`);
+                        } catch (closeError) {
+                            console.error(`Error closing stream writer (Key ${i}):`, closeError);
+                        }
+                    }
+                })();
+
+                ctx.waitUntil(streamProcessing); // Allow background processing
+
+                // Return the readable stream immediately for the client
+                return { readable }; // Indicate success for this key attempt
+
+            } else {
+                // --- Non-Stream Handling ---
+                console.log(`Executing fal.subscribe with key index ${i}... Payload:`, JSON.stringify(falPayload, null, 2));
+                const result = await fal.subscribe("fal-ai/any-llm", falPayload as any) as FalSubscribeResult;
+                console.log(`fal.subscribe successful with key index ${i}.`);
+
+                // Log any embedded logs or errors from the non-stream result
+                if (result?.data?.logs && Array.isArray(result.data.logs)) {
+                    result.data.logs.forEach((log: LogEntry) => console.log(`[Fal Log - Key ${i}] ${log.message}`));
+                }
+                 if (result?.data?.error) {
+                    // Treat error within data as failure for this key
+                    console.error(`Fal-ai returned an error in non-stream mode (Key ${i}):`, result.data.error);
+                    throw new Error(`Fal error in response data: ${JSON.stringify(result.data.error)}`);
+                }
+
+                return result; // Return successful result
+            }
+
+        } catch (error: any) {
+            lastError = error; // Store the error from this attempt
+            console.warn(`Fal request attempt failed for key index ${i}:`, error.message || error);
+
+            // Check if the error suggests a key-specific issue (e.g., auth, rate limit, server error)
+            // Fal client might throw custom errors or HTTP status codes might be attached.
+            // This check might need refinement based on actual errors thrown by @fal-ai/client.
+            // Assuming status property exists for HTTP errors.
+            const status = error?.status || error?.response?.status;
+            const isRetryableError = status === 401 || status === 403 || status === 429 || (status >= 500 && status < 600) || error.message?.includes('authentication') || error.message?.includes('rate limit');
+
+
+            if (isRetryableError && (i < falKeys.length - 1)) {
+                console.log(`Error is potentially key-related or transient (status: ${status}). Trying next key.`);
+                continue; // Try the next key
+            } else {
+                console.error(`Non-retryable error (status: ${status}) or final key attempt failed for key index ${i}.`);
+                throw error; // Re-throw the error if it's not retryable or it's the last key
+            }
+        }
+    }
+
+    // If the loop finishes without returning/throwing successfully, it means all keys failed.
+    console.error("All Fal API key attempts failed.");
+    // Throw the last recorded error
+    throw new Error(`All Fal API key attempts failed. Last error: ${lastError?.message || lastError}`);
+}
+
 // === Main Fetch Handler ===
 export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
-		const corsHeaders = { 'Access-Control-Allow-Origin': '*' }; // Basic CORS header
+		const corsHeaders = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+            'Access-Control-Max-Age': '86400', // Cache preflight for 1 day
+        };
 
 		// Handle CORS preflight requests (OPTIONS)
 		if (method === 'OPTIONS') {
-			 return new Response(null, {
-				 headers: {
-					 ...corsHeaders,
-					'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-					'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-				}
-			});
+			 return new Response(null, { headers: corsHeaders });
 		}
 
-		// --- Authentication & Fal Client Config --- (Run for all relevant endpoints)
-		if (path.startsWith('/v1/')) { // Only process /v1 routes
-			const authHeader = request.headers.get('Authorization');
-			const expectedApiKey = env.API_KEY;
+        let falKeys: string[] = [];
 
-			if (!expectedApiKey) {
+		// --- Authentication & Fal Key Parsing --- (Run for all relevant endpoints)
+		if (path.startsWith('/v1/')) { // Only process /v1 routes
+			// --- Worker Authentication ---
+			const authHeader = request.headers.get('Authorization');
+			const apiKeysString = env.API_KEY;
+
+			if (!apiKeysString) {
 				console.error("API_KEY secret is not set.");
-				return new Response(JSON.stringify({ error: { message: 'Server configuration error: API Key missing.', type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return new Response(JSON.stringify({ error: { message: 'Server configuration error: API Key secret missing.', type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 			}
-			if (!authHeader || !authHeader.startsWith('Bearer ') || authHeader.substring(7) !== expectedApiKey) {
-				console.error(`Auth failed. Header: ${authHeader ? 'Present' : 'Missing'}, Token comparison: ${authHeader?.substring(7) === expectedApiKey}`);
+
+			const allowedApiKeys = apiKeysString.split(',').map(k => k.trim()).filter(k => k.length > 0);
+			if (allowedApiKeys.length === 0) {
+				console.error("API_KEY secret is set but contains no valid keys after parsing.");
+				return new Response(JSON.stringify({ error: { message: 'Server configuration error: No valid API Keys found in secret.', type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+			}
+
+			const providedApiKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
+
+			if (!providedApiKey || !allowedApiKeys.includes(providedApiKey)) {
+				console.error(`Worker auth failed. Header: ${authHeader ? 'Present' : 'Missing'}, Key check: Provided key "${providedApiKey}" not in allowed list.`);
 				return new Response(JSON.stringify({ error: { message: 'Incorrect API key provided.', type: 'invalid_request_error', param: null, code: 'invalid_api_key'} }), { status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 			}
 
-			// Configure Fal client (only if auth passes)
+			// --- Parse Fal Keys ---
 			if (!env.FAL_KEY) {
 				console.error("FAL_KEY secret is not set.");
 				return new Response(JSON.stringify({ error: { message: 'Server configuration error: Fal Key missing.', type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 			}
-			try {
-				// Ensure config is called only once per request if needed, though subsequent calls are generally safe
-				fal.config({ credentials: env.FAL_KEY });
-			} catch (error: any) {
-				 console.error("Failed to configure Fal client:", error);
-				 return new Response(JSON.stringify({ error: { message: `Failed to initialize Fal client: ${error.message}`, type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-			}
+            falKeys = env.FAL_KEY.split(',').map(k => k.trim()).filter(k => k.length > 0);
+            if (falKeys.length === 0) {
+                console.error("FAL_KEY secret is set but contains no valid keys after parsing.");
+				return new Response(JSON.stringify({ error: { message: 'Server configuration error: No valid Fal Keys found.', type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+            }
+            console.log(`Found ${falKeys.length} Fal API key(s).`);
+            // Note: fal.config() is now called inside tryFalRequest for each attempt
+
 		} else if (path === '/') {
 			// Allow root path without auth
 		} else {
@@ -273,7 +472,7 @@ export default {
 			return new Response(JSON.stringify({ error: { message: `Invalid path: ${path}`, type: 'invalid_request_error'} }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 		}
 
-		// --- Routing --- 
+		// --- Routing ---
 
 		// GET /v1/models
 		if (method === 'GET' && path === '/v1/models') {
@@ -285,7 +484,7 @@ export default {
 					owned_by: getOwner(modelId)
 				}));
 				return new Response(JSON.stringify({ object: "list", data: modelsData }), {
-					headers: { 'Content-Type': 'application/json', ...corsHeaders } // Add CORS
+					headers: { 'Content-Type': 'application/json', ...corsHeaders }
 				});
 			} catch (error: any) {
 				console.error("Error processing GET /v1/models:", error);
@@ -307,7 +506,6 @@ export default {
 			if (!requestedModel || !messages || !Array.isArray(messages) || messages.length === 0) {
 				return new Response(JSON.stringify({ error: { message: 'Missing or invalid parameters: model and messages array are required.', type: 'invalid_request_error'} }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 			}
-			// Optionally validate model format here if needed
 
 			// Validate and determine the model to use
 			let modelToUse: FalModelId;
@@ -323,12 +521,11 @@ export default {
 						code: 'model_not_found'
 					}
 				}), {
-					status: 400, // Bad Request for invalid model parameter
+					status: 400,
 					headers: { 'Content-Type': 'application/json', ...corsHeaders }
 				});
 			}
 
-			// Determine if reasoning should be requested from Fal based on reasoning_effort
 			const shouldRequestReasoning = !!reasoning_effort && ['low', 'medium', 'high'].includes(reasoning_effort);
 
 			try {
@@ -336,206 +533,85 @@ export default {
 				const falInput: FalInput = {
 					model: modelToUse,
 					prompt: prompt,
-					reasoning: shouldRequestReasoning, // Set Fal's reasoning based on reasoning_effort
+					reasoning: shouldRequestReasoning,
 				};
 				if (system_prompt) {
 					falInput.system_prompt = system_prompt;
 				}
 
-				console.log(`Forwarding request to fal-ai/any-llm. Model: ${falInput.model}, Stream: ${stream}, Reasoning Effort: ${reasoning_effort ?? 'none'} -> Fal Reasoning: ${falInput.reasoning}`);
+                // Prepare the final payload for Fal
+                const falPayload: FalPayload = { input: falInput };
+
+				console.log(`Preparing request for fal-ai/any-llm. Model: ${falInput.model}, Stream: ${stream}, Reasoning Effort: ${reasoning_effort ?? 'none'} -> Fal Reasoning: ${falInput.reasoning}`);
+
+                // Use the tryFalRequest function with key rotation
+                const result = await tryFalRequest(falKeys, falPayload, stream, requestedModel, ctx);
 
 				if (stream) {
-					// --- Stream Handling using @fal-ai/client ---
-					console.log("Executing streaming request...");
-					try {
-                        // Prepare payload for logging
-                        const falStreamPayload = {
-                            input: falInput as any // Type assertion to bypass TypeScript error
-                            // Add other stream-specific options here if any are used
-                        };
-                        console.log("Sending payload to fal.stream:", JSON.stringify(falStreamPayload, null, 2)); // Log the payload
+                    // --- Stream Handling ---
+                    // tryFalRequest handles the stream setup internally if successful
+                    // We just need to return the response with the readable stream
+                    if ('readable' in result) {
+                        return new Response(result.readable, {
+                            headers: {
+                                'Content-Type': 'text/event-stream; charset=utf-8',
+                                'Cache-Control': 'no-cache',
+                                'Connection': 'keep-alive',
+                                ...corsHeaders // Use combined CORS headers
+                            }
+                        });
+                    } else {
+                         // This case should theoretically not happen if stream=true and no error was thrown
+                         console.error("tryFalRequest returned unexpected result for stream=true");
+                         throw new Error("Internal server error during stream setup.");
+                    }
 
-						// Set up streaming response
-						const encoder = new TextEncoder();
-						const { readable, writable } = new TransformStream();
-						const writer = writable.getWriter();
-						let previousOutput = '';
-
-						// Use ctx.waitUntil to allow the stream processing to continue after the response is returned
-						ctx.waitUntil((async () => {
-							let falStream = null;
-							try {
-								console.log("Initiating fal.stream...");
-								// Use the prepared payload object
-								falStream = await fal.stream("fal-ai/any-llm", falStreamPayload);
-								console.log("fal.stream initiated.");
-
-								for await (const event of falStream) {
-									// console.log("Fal Stream Event:", event); // Verbose stream logging
-									const currentOutput = (event && typeof event.output === 'string') ? event.output : '';
-									const isPartial = (event && typeof event.partial === 'boolean') ? event.partial : true;
-									const errorInfo = (event && event.error) ? event.error : null;
-									const logs = (event && Array.isArray((event as any).logs)) ? (event as any).logs : [];
-									const reasoningData = (event && event.reasoning) ? event.reasoning : null; // Extract reasoning data
-									// Log messages from Fal with explicit type
-									logs.forEach((log: LogEntry) => console.log(`[Fal Log] ${log.message}`));
-
-									if (errorInfo) {
-										console.error("Error received in fal stream event:", errorInfo);
-										const errorChunk = { id: `chatcmpl-${Date.now()}-error`, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model: requestedModel, choices: [{ index: 0, delta: {}, finish_reason: "error", logprobs: null, message: { role: 'assistant', content: `Fal Stream Error: ${JSON.stringify(errorInfo)}` } }] };
-										await writer.write(encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`));
-										throw new Error(`Fal Stream Error: ${JSON.stringify(errorInfo)}`); // Throw to trigger catch block
-									}
-
-									let deltaContent = '';
-									if (currentOutput.startsWith(previousOutput)) {
-										deltaContent = currentOutput.substring(previousOutput.length);
-									} else if (currentOutput.length > 0) {
-										console.warn("Fal stream output mismatch. Sending full current output as delta.");
-										deltaContent = currentOutput;
-										previousOutput = ''; // Reset if mismatch
-									}
-									// Always update previousOutput if currentOutput is not empty, even if deltaContent is empty
-									if(currentOutput.length > 0) {
-										previousOutput = currentOutput;
-									}
-
-									// Send chunk if there's new content, reasoning data, or it's the final chunk
-									if (deltaContent || reasoningData || !isPartial) {
-										const choice = {
-											index: 0,
-											delta: { content: deltaContent },
-											finish_reason: isPartial === false ? "stop" : null,
-											logprobs: null,
-											// Include reasoning if present in this event
-											...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
-										};
-
-										const openAIChunk = {
-											id: `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
-											object: "chat.completion.chunk",
-											created: Math.floor(Date.now() / 1000),
-											model: requestedModel, // Report the originally requested model
-											choices: [choice]
-										};
-										await writer.write(encoder.encode(`data: ${JSON.stringify(openAIChunk)}\n\n`));
-									}
-									// Add a small delay if needed to prevent overwhelming the writer, though usually not necessary
-									// await new Promise(resolve => setTimeout(resolve, 5));
-								}
-								console.log("Fal stream iteration finished successfully.");
-								// Send DONE marker after successful completion
-								await writer.write(encoder.encode(`data: [DONE]\n\n`));
-
-							} catch (streamError: any) {
-								console.error('Error during fal stream processing:', streamError);
-								 try {
-									const errorDetails = (streamError instanceof Error) ? streamError.message : JSON.stringify(streamError);
-									const errorChunk = { error: { message: "Stream processing error", type: "proxy_error", param: null, code: null, details: errorDetails } };
-									await writer.write(encoder.encode(`data: ${JSON.stringify(errorChunk)}\n\n`));
-									// Ensure DONE is sent even after an error during processing
-									await writer.write(encoder.encode(`data: [DONE]\n\n`));
-								} catch (writeError) {
-									console.error("Error writing final stream error message:", writeError);
-								}
-							} finally {
-								// Close the writer in the finally block to ensure it always happens
-								try {
-									console.log("Closing stream writer...");
-									await writer.close();
-									console.log("Stream writer closed.");
-								} catch (closeError) {
-									console.error("Error closing stream writer:", closeError);
-								}
-							}
-						})()); // End of ctx.waitUntil
-
-						return new Response(readable, {
-							headers: {
-								'Content-Type': 'text/event-stream; charset=utf-8',
-								'Cache-Control': 'no-cache',
-								'Connection': 'keep-alive',
-								'Access-Control-Allow-Origin': '*' // Adjust CORS as needed
-							}
-						});
-
-					} catch (error: any) {
-						console.error("Error during fal-ai request processing:", error);
-						return new Response(JSON.stringify({ error: { message: `Error processing request: ${error.message}`, type: 'server_error' } }),
-							{ status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-					}
 				} else {
-					// --- Non-Stream Handling using @fal-ai/client ---
-					console.log("Executing non-stream request...");
-					try {
-                        // Prepare payload for logging
-                        const falSubscribePayload = {
-                            input: falInput as any // Type assertion to bypass TypeScript error
-                            // Add other subscribe-specific options here if any are used
-                        };
-                        console.log("Sending payload to fal.subscribe:", JSON.stringify(falSubscribePayload, null, 2)); // Log the payload
+					// --- Non-Stream Handling ---
+                    // tryFalRequest returns the FalSubscribeResult directly if successful
+					const falResult = result as FalSubscribeResult; // Type assertion
 
-						// Use the prepared payload object
-						const result = await fal.subscribe("fal-ai/any-llm", falSubscribePayload) as FalSubscribeResult;
+					// Log the raw result for debugging (optional)
+					// console.log("Raw non-stream result from fal-ai:", JSON.stringify(falResult, null, 2));
 
-						// Log the raw result for debugging
-						console.log("Raw non-stream result from fal-ai:", JSON.stringify(result, null, 2));
+					// Access properties correctly from the data object returned by tryFalRequest
+                    const outputContent = falResult?.data?.output ?? "";
+                    const reasoningData = falResult?.data?.reasoning;
+                    const reqId = falResult?.requestId || Date.now().toString();
 
-						// Check for errors within the data object
-						if (result?.data?.error) {
-							console.error("Fal-ai returned an error in non-stream mode:", result.data.error);
-							return new Response(JSON.stringify({ object: "error", message: `Fal-ai error: ${JSON.stringify(result.data.error)}`, type: "fal_ai_error" }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-						}
-
-						// Log any messages from non-streaming response (assuming logs might be in data)
-						if (result?.data?.logs && Array.isArray(result.data.logs)) {
-							result.data.logs.forEach((log: LogEntry) => console.log(`[Fal Log] ${log.message}`));
-						}
-
-						// Access properties correctly from the data object
-						const outputContent = result?.data?.output ?? "";
-						const reasoningData = result?.data?.reasoning; // Get reasoning data
-						const reqId = result?.requestId || Date.now().toString(); // Use correct requestId
-
-						const openAIResponse = {
-							id: `chatcmpl-${reqId}`,
-							object: "chat.completion",
-							created: Math.floor(Date.now() / 1000),
-							model: requestedModel, // Report the originally requested model
-							choices: [{
-								index: 0,
-								message: {
-									role: "assistant",
-									content: outputContent
-								},
-								finish_reason: "stop",
-								logprobs: null,
-								// Include reasoning if present in the result
-								...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
-							}],
-							usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null }, // Usage data might be available from Fal in the future
-							system_fingerprint: null,
-						};
-						return new Response(JSON.stringify(openAIResponse), {
-							 headers: { 'Content-Type': 'application/json', ...corsHeaders } // Add CORS
-						});
-
-					} catch (falError: any) {
-						console.error('Error calling fal.subscribe:', falError);
-						const errorMessage = (falError instanceof Error) ? falError.message : JSON.stringify(falError);
-						return new Response(JSON.stringify({ error: { message: `Error from Fal: ${errorMessage}`, type: 'fal_api_error' } }),
-							{ status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
-					}
+					const openAIResponse = {
+						id: `chatcmpl-${reqId}`,
+						object: "chat.completion",
+						created: Math.floor(Date.now() / 1000),
+						model: requestedModel, // Report the originally requested model
+						choices: [{
+							index: 0,
+							message: {
+								role: "assistant",
+								content: outputContent
+							},
+							finish_reason: "stop",
+							logprobs: null,
+							...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
+						}],
+						usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null },
+						system_fingerprint: null,
+					};
+					return new Response(JSON.stringify(openAIResponse), {
+						 headers: { 'Content-Type': 'application/json', ...corsHeaders }
+					});
 				}
 			} catch (error: any) {
-				console.error("Error during fal-ai request processing:", error);
-				return new Response(JSON.stringify({ error: { message: `Error processing request: ${error.message}`, type: 'server_error' } }),
+                // Catch errors from tryFalRequest (e.g., all keys failed) or other processing errors
+				console.error("Error during Fal request processing or after retries:", error);
+                const errorMessage = (error instanceof Error) ? error.message : JSON.stringify(error);
+				return new Response(JSON.stringify({ error: { message: `Error processing request: ${errorMessage}`, type: 'server_error' } }),
 					{ status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 			}
 		}
 
 		// Default response for root path or other unhandled routes
-		return new Response(JSON.stringify({ status: 'ok', message: 'Fal AI-powered OpenAI Proxy API' }), 
+		return new Response(JSON.stringify({ status: 'ok', message: 'Fal AI-powered OpenAI Proxy API' }),
 			{ headers: { 'Content-Type': 'application/json', ...corsHeaders } });
 	}
 };
