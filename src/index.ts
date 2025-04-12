@@ -27,6 +27,13 @@ interface Env {
 	 * Configure this secret in your Cloudflare dashboard or wrangler.jsonc.
 	 */
 	API_KEY: string;
+	/**
+	 * Comma-separated list of allowed origins for CORS.
+	 * Example: "https://example.com,https://app.example.com"
+	 * If not set, defaults to '*' (all origins).
+	 * Configure this secret in your Cloudflare dashboard or wrangler.jsonc.
+	 */
+	ALLOWED_ORIGINS?: string;
 }
 
 // OpenAI Request/Response Types (Simplified)
@@ -237,6 +244,28 @@ function isValidFalModelId(modelId: string): modelId is FalModelId {
 	return (FAL_SUPPORTED_MODELS as readonly string[]).includes(modelId);
 }
 
+// === CORS Utilities ===
+// Default CORS headers
+function getCorsHeaders(): HeadersInit {
+    return {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE, PATCH',
+        'Access-Control-Allow-Headers': '*',
+        'Access-Control-Max-Age': '86400', // Cache preflight for 1 day
+    };
+}
+
+// Create a response with CORS headers included
+function createCorsResponse(body: string | null, options: ResponseInit): Response {
+    const corsHeaders = getCorsHeaders();
+    const headers = { ...options.headers, ...corsHeaders };
+    
+    return new Response(body, {
+        ...options,
+        headers
+    });
+}
+
 /**
  * Attempts a Fal API request (stream or subscribe) with key rotation on failure.
  * @param falKeys Array of Fal API keys.
@@ -414,16 +443,13 @@ export default {
 		const url = new URL(request.url);
 		const path = url.pathname;
 		const method = request.method;
-		const corsHeaders = {
-            'Access-Control-Allow-Origin': '*',
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Authorization, Content-Type',
-            'Access-Control-Max-Age': '86400', // Cache preflight for 1 day
-        };
 
 		// Handle CORS preflight requests (OPTIONS)
 		if (method === 'OPTIONS') {
-			 return new Response(null, { headers: corsHeaders });
+			 return new Response(null, { 
+                status: 204,
+                headers: getCorsHeaders()
+             });
 		}
 
         let falKeys: string[] = [];
@@ -436,31 +462,46 @@ export default {
 
 			if (!apiKeysString) {
 				console.error("API_KEY secret is not set.");
-				return new Response(JSON.stringify({ error: { message: 'Server configuration error: API Key secret missing.', type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Server configuration error: API Key secret missing.', type: 'server_error' } }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			const allowedApiKeys = apiKeysString.split(',').map(k => k.trim()).filter(k => k.length > 0);
 			if (allowedApiKeys.length === 0) {
 				console.error("API_KEY secret is set but contains no valid keys after parsing.");
-				return new Response(JSON.stringify({ error: { message: 'Server configuration error: No valid API Keys found in secret.', type: 'server_error' } }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Server configuration error: No valid API Keys found in secret.', type: 'server_error' } }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			const providedApiKey = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null;
 
 			if (!providedApiKey || !allowedApiKeys.includes(providedApiKey)) {
 				console.error(`Worker auth failed. Header: ${authHeader ? 'Present' : 'Missing'}, Key check: Provided key "${providedApiKey}" not in allowed list.`);
-				return new Response(JSON.stringify({ error: { message: 'Incorrect API key provided.', type: 'invalid_request_error', param: null, code: 'invalid_api_key'} }), { status: 401, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Incorrect API key provided.', type: 'invalid_request_error', param: null, code: 'invalid_api_key'} }), 
+                    { status: 401, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			// --- Parse Fal Keys ---
 			if (!env.FAL_KEY) {
 				console.error("FAL_KEY secret is not set.");
-				return new Response(JSON.stringify({ error: { message: 'Server configuration error: Fal Key missing.', type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Server configuration error: Fal Key missing.', type: 'server_error'} }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
             falKeys = env.FAL_KEY.split(',').map(k => k.trim()).filter(k => k.length > 0);
             if (falKeys.length === 0) {
                 console.error("FAL_KEY secret is set but contains no valid keys after parsing.");
-				return new Response(JSON.stringify({ error: { message: 'Server configuration error: No valid Fal Keys found.', type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Server configuration error: No valid Fal Keys found.', type: 'server_error'} }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
             }
             console.log(`Found ${falKeys.length} Fal API key(s).`);
             // Note: fal.config() is now called inside tryFalRequest for each attempt
@@ -469,7 +510,10 @@ export default {
 			// Allow root path without auth
 		} else {
 			// Any other path is Not Found
-			return new Response(JSON.stringify({ error: { message: `Invalid path: ${path}`, type: 'invalid_request_error'} }), { status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+			return createCorsResponse(
+                JSON.stringify({ error: { message: `Invalid path: ${path}`, type: 'invalid_request_error'} }), 
+                { status: 404, headers: { 'Content-Type': 'application/json' } }
+            );
 		}
 
 		// --- Routing ---
@@ -483,12 +527,16 @@ export default {
 					created: Math.floor(Date.now() / 1000),
 					owned_by: getOwner(modelId)
 				}));
-				return new Response(JSON.stringify({ object: "list", data: modelsData }), {
-					headers: { 'Content-Type': 'application/json', ...corsHeaders }
-				});
+				return createCorsResponse(
+                    JSON.stringify({ object: "list", data: modelsData }), 
+                    { headers: { 'Content-Type': 'application/json' } }
+                );
 			} catch (error: any) {
 				console.error("Error processing GET /v1/models:", error);
-				return new Response(JSON.stringify({ error: { message: `Failed to retrieve model list: ${error.message}`, type: 'server_error'} }), { status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: `Failed to retrieve model list: ${error.message}`, type: 'server_error'} }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 		}
 
@@ -498,13 +546,19 @@ export default {
 			try {
 				requestBody = await request.json();
 			} catch (error) {
-				return new Response(JSON.stringify({ error: { message: 'Invalid JSON request body', type: 'invalid_request_error'} }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Invalid JSON request body', type: 'invalid_request_error'} }), 
+                    { status: 400, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			const { model: requestedModel, messages, stream = false, reasoning_effort } = requestBody;
 
 			if (!requestedModel || !messages || !Array.isArray(messages) || messages.length === 0) {
-				return new Response(JSON.stringify({ error: { message: 'Missing or invalid parameters: model and messages array are required.', type: 'invalid_request_error'} }), { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: 'Missing or invalid parameters: model and messages array are required.', type: 'invalid_request_error'} }), 
+                    { status: 400, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			// Validate and determine the model to use
@@ -513,17 +567,17 @@ export default {
 				modelToUse = requestedModel;
 			} else {
 				console.error(`Error: Requested model '${requestedModel}' is not supported.`);
-				return new Response(JSON.stringify({
-					error: {
-						message: `The model \`${requestedModel}\` does not exist or is not supported by this endpoint.`,
-						type: 'invalid_request_error',
-						param: 'model',
-						code: 'model_not_found'
-					}
-				}), {
-					status: 400,
-					headers: { 'Content-Type': 'application/json', ...corsHeaders }
-				});
+				return createCorsResponse(
+                    JSON.stringify({
+                        error: {
+                            message: `The model \`${requestedModel}\` does not exist or is not supported by this endpoint.`,
+                            type: 'invalid_request_error',
+                            param: 'model',
+                            code: 'model_not_found'
+                        }
+                    }), 
+                    { status: 400, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 
 			const shouldRequestReasoning = !!reasoning_effort && ['low', 'medium', 'high'].includes(reasoning_effort);
@@ -552,12 +606,14 @@ export default {
                     // tryFalRequest handles the stream setup internally if successful
                     // We just need to return the response with the readable stream
                     if ('readable' in result) {
+                        // For streaming responses, we need to add CORS headers but keep the stream
+                        const corsHeaders = getCorsHeaders();
                         return new Response(result.readable, {
                             headers: {
                                 'Content-Type': 'text/event-stream; charset=utf-8',
                                 'Cache-Control': 'no-cache',
                                 'Connection': 'keep-alive',
-                                ...corsHeaders // Use combined CORS headers
+                                ...corsHeaders
                             }
                         });
                     } else {
@@ -597,21 +653,26 @@ export default {
 						usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null },
 						system_fingerprint: null,
 					};
-					return new Response(JSON.stringify(openAIResponse), {
-						 headers: { 'Content-Type': 'application/json', ...corsHeaders }
-					});
+					return createCorsResponse(
+                        JSON.stringify(openAIResponse), 
+                        { headers: { 'Content-Type': 'application/json' } }
+                    );
 				}
 			} catch (error: any) {
                 // Catch errors from tryFalRequest (e.g., all keys failed) or other processing errors
 				console.error("Error during Fal request processing or after retries:", error);
                 const errorMessage = (error instanceof Error) ? error.message : JSON.stringify(error);
-				return new Response(JSON.stringify({ error: { message: `Error processing request: ${errorMessage}`, type: 'server_error' } }),
-					{ status: 500, headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+				return createCorsResponse(
+                    JSON.stringify({ error: { message: `Error processing request: ${errorMessage}`, type: 'server_error' } }), 
+                    { status: 500, headers: { 'Content-Type': 'application/json' } }
+                );
 			}
 		}
 
 		// Default response for root path or other unhandled routes
-		return new Response(JSON.stringify({ status: 'ok', message: 'Fal AI-powered OpenAI Proxy API' }),
-			{ headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+		return createCorsResponse(
+            JSON.stringify({ status: 'ok', message: 'Fal AI-powered OpenAI Proxy API' }), 
+            { headers: { 'Content-Type': 'application/json' } }
+        );
 	}
 };
