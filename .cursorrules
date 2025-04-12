@@ -1,0 +1,2 @@
+- Framework: Cloudflare Worker + Typescript
+- All Cloudflare Configuration should use wrangler.jsonc format, refer https://developers.cloudflare.com/workers/wrangler/configuration/
