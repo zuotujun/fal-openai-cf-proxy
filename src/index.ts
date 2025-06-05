@@ -48,7 +48,6 @@ interface OpenAIChatCompletionRequest {
 	stream?: boolean;
 	// We can add other OpenAI parameters here if needed, but keep them simple for now
 	// e.g., max_tokens, temperature, etc.
-	reasoning_effort?: 'low' | 'medium' | 'high'; // New param compatible with OpenAI reasoning
 }
 
 // Type for supported Fal Model IDs based on the constant array
@@ -59,7 +58,6 @@ interface FalInput {
 	model: FalModelId; // Use the specific type
 	prompt: string;
 	system_prompt?: string;
-	reasoning?: boolean;
 	// Fal-specific parameters can be added here if needed
 }
 
@@ -78,7 +76,6 @@ interface LogEntry {
 // Type for Fal Stream Event Data
 interface FalStreamEventData {
     output: string;
-    reasoning?: any; // Or a more specific type if known
     partial?: boolean;
     error?: any; // Or a more specific type if known
     logs?: LogEntry[];
@@ -87,7 +84,6 @@ interface FalStreamEventData {
 // Type for Fal Stream Event (passed in iterator)
 interface FalStreamEvent {
 	output: string;
-    reasoning?: any; // Or a more specific type if known
     partial?: boolean;
     error?: any; // Or a more specific type if known
     logs?: LogEntry[];
@@ -396,7 +392,7 @@ async function tryFalRequest(
                             const isPartial = (event && typeof event.partial === 'boolean') ? event.partial : true; // Assume partial if not specified
                             const errorInfo = (event && event.error) ? event.error : null;
                             const logs = (event && Array.isArray((event as any).logs)) ? (event as any).logs : [];
-                            const reasoningData = (event && event.reasoning) ? event.reasoning : null;
+
                             logs.forEach((log: LogEntry) => console.log(`[Fal Log - Key ${i}] ${log.message}`));
 
                             if (errorInfo) {
@@ -418,13 +414,12 @@ async function tryFalRequest(
                                 previousOutput = currentOutput;
                             }
 
-                            if (deltaContent || reasoningData || !isPartial) {
+                            if (deltaContent || !isPartial) {
                                 const choice = {
                                     index: 0,
                                     delta: { content: deltaContent },
                                     finish_reason: isPartial === false ? "stop" : null,
-                                    logprobs: null,
-                                    ...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
+                                    logprobs: null
                                 };
                                 const openAIChunk = {
                                     id: `chatcmpl-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`,
@@ -631,7 +626,7 @@ export default {
                 );
 			}
 
-			const { model: requestedModel, messages, stream = false, reasoning_effort } = requestBody;
+			const { model: requestedModel, messages, stream = false } = requestBody;
 
 			if (!requestedModel || !messages || !Array.isArray(messages) || messages.length === 0) {
 				return createCorsResponse(
@@ -659,7 +654,7 @@ export default {
                 );
 			}
 
-			const shouldRequestReasoning = !!reasoning_effort && ['low', 'medium', 'high'].includes(reasoning_effort);
+
 
 			try {
 				const convertResult = convertMessagesToFalPrompt(messages);
@@ -676,7 +671,6 @@ export default {
 				const falInput: FalInput = {
 					model: modelToUse,
 					prompt: prompt,
-					reasoning: shouldRequestReasoning,
 				};
 				if (system_prompt) {
 					falInput.system_prompt = system_prompt;
@@ -685,7 +679,7 @@ export default {
                 // Prepare the final payload for Fal
                 const falPayload: FalPayload = { input: falInput };
 
-				console.log(`Preparing request for fal-ai/any-llm. Model: ${falInput.model}, Stream: ${stream}, Reasoning Effort: ${reasoning_effort ?? 'none'} -> Fal Reasoning: ${falInput.reasoning}`);
+				console.log(`Preparing request for fal-ai/any-llm. Model: ${falInput.model}, Stream: ${stream}`);
 
                 // Use the tryFalRequest function with key rotation
                 const result = await tryFalRequest(falKeys, falPayload, stream, requestedModel, ctx);
@@ -721,7 +715,6 @@ export default {
 
 					// Access properties correctly from the data object returned by tryFalRequest
                     const outputContent = falResult?.data?.output ?? "";
-                    const reasoningData = falResult?.data?.reasoning;
                     const reqId = falResult?.requestId || Date.now().toString();
 
 					const openAIResponse = {
@@ -736,8 +729,7 @@ export default {
 								content: outputContent
 							},
 							finish_reason: "stop",
-							logprobs: null,
-							...(reasoningData && { reasoning: [{ index: 0, content: reasoningData }] })
+							logprobs: null
 						}],
 						usage: { prompt_tokens: null, completion_tokens: null, total_tokens: null },
 						system_fingerprint: null,
