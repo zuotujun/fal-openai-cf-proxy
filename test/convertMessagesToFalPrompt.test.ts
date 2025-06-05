@@ -17,7 +17,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { convertMessagesToFalPrompt, OpenAIMessage, SYSTEM_PROMPT_LIMIT } from '../src/index';
+import { convertMessagesToFalPrompt, OpenAIMessage } from '../src/index';
+
+// Define the constant locally for testing purposes
+const SYSTEM_PROMPT_LIMIT = 4800;
 
 describe('convertMessagesToFalPrompt', () => {
 	// === 基础测试用例 ===

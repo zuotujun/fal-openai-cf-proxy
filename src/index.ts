@@ -102,7 +102,7 @@ interface FalSubscribeResult {
 }
 
 // === Global Definitions ===
-export const SYSTEM_PROMPT_LIMIT = 4800;
+const SYSTEM_PROMPT_LIMIT = 4800;
 
 const FAL_SUPPORTED_MODELS = [
 	"anthropic/claude-3.7-sonnet",
